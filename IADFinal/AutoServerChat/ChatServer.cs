@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
@@ -11,8 +12,11 @@ namespace AutoServerChat {
     internal class ChatServer : IDisposable{
         private DateTime startTime;
         private volatile bool stopping = false;
-        private UInt64 guid = 0;//todo: generate
-        private ConcurrentBag<TcpClient> clients = new ConcurrentBag<TcpClient>();
+        private UInt64 guid;//id for settling disputes between servers with very close ages
+
+        //list of clients identified by id
+        private ConcurrentDictionary<int, TcpClient> clients = new ConcurrentDictionary<int, TcpClient>();
+        private int nextClientId = 0;
         //contains the name and message string from messages to be sent to the clients
         private ConcurrentQueue<Tuple<string, string>> msgQueue = new ConcurrentQueue<Tuple<string, string>>();
 
@@ -21,6 +25,10 @@ namespace AutoServerChat {
             BeginBroadcastHandling();
             BeginAcceptingClients();
             BeginMsgHandling();
+
+            //id for settling disputes between servers with very close ages
+            Random rand = new Random();
+            guid = (UInt64)(rand.NextDouble() * UInt64.MaxValue);
         }
 
         public UInt32 GetAge() {
@@ -36,14 +44,22 @@ namespace AutoServerChat {
                     while(!stopping) {
                         if(listener.Pending()) {
                             TcpClient client = listener.AcceptTcpClient();
-                            BeginHandleClient(client);
-                            clients.Add(client);
+                            string name = ((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString();
+                            while(!clients.TryAdd(nextClientId, client)) {
+                                nextClientId++;
+                            }
+                            BeginRecvFromClient(client, name, nextClientId++);
+                            msgQueue.Enqueue(new Tuple<string, string>("SERVER", name + " connected."));
                         } else {
                             Task.Delay(50).Wait();
                         }
                     }
                 } catch(Exception ex) {
-                    throw;//todo: handle exceptions
+                    if(ex is SocketException) {
+                        Stop();
+                    } else {
+                        throw;
+                    }
                 } finally {
                     listener.Stop();
                 }
@@ -66,30 +82,57 @@ namespace AutoServerChat {
 
                         //fill buf
                         byte[] buf = new byte[4 + nameBytes.Length + msgBytes.Length];
-                        buf[0] = Protocol.SAY;
+                        buf[0] = Protocol.SAY_DISPATCH;
                         Buffer.BlockCopy(nameLength, 0, buf, 1, 1);
                         Buffer.BlockCopy(nameBytes, 0, buf, 2, nameBytes.Length);
                         Buffer.BlockCopy(msgLength, 0, buf, 2+nameBytes.Length, 2);
                         Buffer.BlockCopy(msgBytes, 0, buf, 2+nameBytes.Length+2, msgBytes.Length);
 
-                        foreach(TcpClient client in clients) {
-                            client.GetStream().Write(buf, 0, buf.Length);
+                        foreach(var clientKeyValue in clients) {
+                            clientKeyValue.Value.GetStream().Write(buf, 0, buf.Length);
                         }
                     }
                     Task.Delay(20).Wait();
                 }
             });
         }
-        private void BeginHandleClient(TcpClient client) {
+
+        private void BeginRecvFromClient(TcpClient client, string name, int id) {
             Task.Run(() => {
                 try {
+                    NetworkStream stream = client.GetStream();
+
                     while(!stopping) {
-                        //todo: receive from and add messages to msgQueue
+                        int inByte = -1;
+                        if((inByte = stream.ReadByte()) != -1) {
+                            if(inByte == Protocol.SAY) {
+                                //get message length
+                                byte[] inBytes = new byte[2];
+                                stream.Read(inBytes, 0, 2);
+                                UInt16 msgLen = BitConverter.ToUInt16(inBytes, 0);
+                                //get message
+                                inBytes = new byte[msgLen];
+                                stream.Read(inBytes, 0, msgLen);
+                                string msg = Encoding.Unicode.GetString(inBytes);
+                                msg = msg.Trim();//todo: trim name aswell
+
+                                //add to queue for dispatching
+                                msgQueue.Enqueue(new Tuple<string, string>(name, msg));
+                            }else if(inByte == Protocol.SET_NAME) {
+                                throw new NotImplementedException();//todo
+                            }
+                        }
                     }
                 } catch(Exception ex) {
-                    throw;//todo: handle exceptions
+                    if(ex is SocketException || ex is IOException) {//todo: others
+                        TcpClient ignore;
+                        clients.TryRemove(id, out ignore);
+                    } else {
+                        throw;
+                    }
                 } finally {
                     client.Close();
+                    msgQueue.Enqueue(new Tuple<string, string>("SERVER", name + " disconnected."));
                 }
             });
         }
@@ -98,11 +141,9 @@ namespace AutoServerChat {
             Task.Run(() => {
                 using(UdpClient udpClient = new UdpClient()) {//todo: exceptions
 
-                    //todo: remove next 2 lines and see if 2 clients can still coexiston on one pc
+                    //set socket to allow multiple multiple binds and broadcasting
                     udpClient.ExclusiveAddressUse = false;
-                    //debug: maybe enable below
                     udpClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-                    //todo: check if i need to set SocketOptionName.Broadcast
                     udpClient.EnableBroadcast = true;
                     udpClient.Client.Bind(new IPEndPoint(IPAddress.Any, Protocol.PORT));
                     
@@ -114,44 +155,48 @@ namespace AutoServerChat {
                             delay = Task.Delay(100);
                         } else {
                             delay = Task.Delay(2000);
-                        }                        
+                        }
+
+                        //send SERVER_INFO atleast once every loop
+                        SendServerInfoPacket(udpClient, destination);
 
                         //read SERVER_INFO messages
                         while(!delay.IsCompleted) {
-                            if(udpClient.Available == 0) {
+                            if(udpClient.Available == 0) {//todo: check that is replying to SERVER_INFO_REQUESTS right away
                                 Task.Delay(20).Wait();
                                 continue;
                             }
 
                             IPEndPoint sender = new IPEndPoint(IPAddress.Any, Protocol.PORT);
                             byte[] bytes = udpClient.Receive(ref sender);
-                            sender.Address = IPAddress.Any;
 
                             //reply to info requests
                             if(bytes[0] == Protocol.SERVER_INFO_REQUEST) {
                                 SendServerInfoPacket(udpClient, destination);
                             }
                             //check if SERVER_INFO
-                            else if(bytes[0] == Protocol.SERVER_INFO && bytes.Length == 13) {
-                                UInt32 thisAge = GetAge();
+                            else if(bytes[0] == Protocol.SERVER_INFO && bytes.Length == 17) {
+                                UInt32 thisAge = GetAge();//get age right away
+
+                                //check if own broadcast before CRC to prevent wasting resources
+                                UInt64 otherGuid = BitConverter.ToUInt64(bytes, 5);
+                                if(otherGuid == guid) {
+                                    continue;//skip
+                                }
 
                                 //todo: check crc 
 
-                                IPAddress otherIp = sender.Address;
-                                UInt64 otherGuid = BitConverter.ToUInt64(bytes, 5);
                                 UInt32 otherAge = BitConverter.ToUInt32(bytes, 1);
 
                                 //if other server is more legitimate
                                 if(((Int64)otherAge - thisAge > 2) || 
                                     (Math.Abs((Int64)otherAge - thisAge) <= 2 && otherGuid > guid)) {
-                                    stopping = true;//signal server to stop
+                                    Stop();//signal server to stop
                                 }
 
                             }                      
                         }
 
-                        //send SERVER_INFO atleast once every loop
-                        SendServerInfoPacket(udpClient, destination);
                     }
                 }
             });
@@ -168,17 +213,20 @@ namespace AutoServerChat {
             client.Send(buf, buf.Length, dest);
         }
 
+        private void Stop() {
+            stopping = true;
+            foreach(var client in clients) {
+                client.Value.Close();
+            }    
+        }
+
         #region IDisposable Support
         private bool disposed = false; // To detect redundant calls
 
         //todo: make sure all tasks are stopped BEFORE dispose returns
         public void Dispose() {
             if(!disposed) {
-                stopping = true;//signal everything to stop
-
-                //todo: wait for tasks to stop                
-
-                //todo: close stuff
+                Stop();
                 disposed = true;
             }
         }

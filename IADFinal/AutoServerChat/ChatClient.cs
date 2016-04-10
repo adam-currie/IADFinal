@@ -9,22 +9,28 @@ using System.Threading;
 using System.Threading.Tasks;
 
 namespace AutoServerChat {
-    internal class ChatClient : IChatNode, IDisposable {
+    internal class ChatClient : IChatNode {
         public event EventHandler<MessageSaidEventArgs> MessageSaid;
-        public event EventHandler ConnectionLost; 
+        public event EventHandler ConnectionLost;//add handler
         private TcpClient client;
         private int clientAccessCounter = 0;//number of execution context's accessing the tcp client
-        private volatile bool stopping = false;
+        private volatile bool connected = false;
 
         public string Name {
             get {
                 throw new NotImplementedException();
             }
             set {
-                if(disposed) {
-                    throw new ObjectDisposedException(GetType().FullName);
+                if(!connected) {
+                    throw new InvalidOperationException("not connected");
                 }
                 throw new NotImplementedException();
+            }
+        }
+
+        public bool Connected {
+            get {
+                return connected;
             }
         }
 
@@ -35,12 +41,17 @@ namespace AutoServerChat {
          *
          * @param   port    The port.
          */
-        public ChatClient(IPEndPoint server) {
+        public void Connect(IPEndPoint server) {
+            if(connected) {
+                throw new InvalidOperationException("already connected");
+            }
+
             //todo: exceptions
             client = new TcpClient();
             client.ExclusiveAddressUse = false;
             client.Connect(server);
             BeginRecv();
+            connected = true;
         }
 
         private void BeginRecv() {
@@ -48,7 +59,7 @@ namespace AutoServerChat {
                 Interlocked.Increment(ref clientAccessCounter);
                 try {
                     NetworkStream stream = client.GetStream();
-                    while(!stopping) {
+                    while(connected) {
                         int inByte = -1;
                         if((inByte = stream.ReadByte()) != -1){
                             if(inByte == Protocol.SAY_DISPATCH) {
@@ -71,7 +82,9 @@ namespace AutoServerChat {
                                 stream.Read(inBytes, 0, msgLen);
                                 string msg = Encoding.Unicode.GetString(inBytes);
 
-                                MessageSaid(this, new MessageSaidEventArgs(sayer, msg));
+                                if(MessageSaid != null) {
+                                    MessageSaid(this, new MessageSaidEventArgs(sayer, msg));
+                                }
                             }
                         } else {
                             //small delay before checking again for something to read
@@ -80,60 +93,60 @@ namespace AutoServerChat {
                     }
                 } catch(Exception ex) {
                     if(ex is SocketException || ex is IOException || ex is ObjectDisposedException) {
-                        //todo: handle connection loss
+                        connected = false;
+                        if(ConnectionLost != null) {
+                            ConnectionLost(this, null);
+                        }
                     } else {
                         throw;
                     }
                 } finally {
                     Interlocked.Decrement(ref clientAccessCounter);
+                    Close();
                 }
             });
         }
 
         public void Say(string msg) {
             //todo: maybe do all on new task
-            if(disposed) {
-                throw new ObjectDisposedException(GetType().FullName);
+            if(!connected) {
+                throw new InvalidOperationException("not connected");
             }
 
-            if(!stopping) {
-                //get msg bytes
-                byte[] msgBytes = Encoding.Unicode.GetBytes(msg);
-                if(msgBytes.Length > UInt16.MaxValue) {
-                    throw new ArgumentException("message length is too long.");
+            msg = msg.Trim();//to save bandwith, trimmed on server side anyway.
+
+            //get msg bytes
+            byte[] msgBytes = Encoding.Unicode.GetBytes(msg);
+            if(msgBytes.Length > UInt16.MaxValue) {
+                throw new ArgumentException("message length is too long.");
+            }
+
+            //get length bytes
+            byte[] lengthBytes = BitConverter.GetBytes((UInt16)msgBytes.Length);
+
+            //fill buffer
+            byte[] buf = new byte[3 + msgBytes.Length];
+            buf[0] = Protocol.SAY;
+            Buffer.BlockCopy(lengthBytes, 0, buf, 1, 2);
+            Buffer.BlockCopy(msgBytes, 0, buf, 3, msgBytes.Length);
+
+            Interlocked.Increment(ref clientAccessCounter);
+            try {
+                client.GetStream().Write(buf, 0, buf.Length);
+            } catch(Exception ex) {
+                if(ex is IOException || ex is ObjectDisposedException) {
+                    //todo: handle connection loss
+                } else {
+                    throw;
                 }
-
-                //get length bytes
-                byte[] lengthBytes = BitConverter.GetBytes((UInt16)msgBytes.Length);
-
-                //fill buffer
-                byte[] buf = new byte[3 + msgBytes.Length];
-                buf[0] = Protocol.SAY;
-                Buffer.BlockCopy(lengthBytes, 0, buf, 1, 2);
-                Buffer.BlockCopy(msgBytes, 0, buf, 3, msgBytes.Length);
-
-                Interlocked.Increment(ref clientAccessCounter);
-                try {
-                    client.GetStream().Write(buf, 0, buf.Length);
-                } catch(Exception ex) {
-                    if(ex is IOException || ex is ObjectDisposedException) {
-                        //todo: handle connection loss
-                    } else {
-                        throw;
-                    }
-                } finally {
-                    Interlocked.Decrement(ref clientAccessCounter);
-                }
+            } finally {
+                Interlocked.Decrement(ref clientAccessCounter);
             }
         }
 
-        #region IDisposable Support
-        private bool disposed = false; // To detect redundant calls
-
-        //todo: make sure all tasks are stopped BEFORE dispose returns
-        public void Dispose() {
-            if(!disposed) {
-                stopping = true;//signal everything to stop
+        public void Close() {
+            if(connected) {
+                connected = false;//signal everything to stop
 
                 //wait for threads using client to wrap up
                 while(clientAccessCounter > 0) {
@@ -143,9 +156,8 @@ namespace AutoServerChat {
                 if(client != null) {
                     client.Close();
                 }
-                disposed = true;
+                connected = false;
             }
         }
-        #endregion
     }
 }

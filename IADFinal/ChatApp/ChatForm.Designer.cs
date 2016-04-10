@@ -39,6 +39,7 @@
             this.sendButton.TabIndex = 0;
             this.sendButton.Text = "send";
             this.sendButton.UseVisualStyleBackColor = true;
+            this.sendButton.Click += new System.EventHandler(this.sendButton_Click);
             // 
             // nameLabel
             // 
@@ -65,6 +66,7 @@
             this.inputTextBox.Location = new System.Drawing.Point(12, 200);
             this.inputTextBox.Multiline = true;
             this.inputTextBox.Name = "inputTextBox";
+            this.inputTextBox.ScrollBars = System.Windows.Forms.ScrollBars.Vertical;
             this.inputTextBox.Size = new System.Drawing.Size(380, 40);
             this.inputTextBox.TabIndex = 3;
             // 
@@ -76,6 +78,8 @@
             this.outputTextBox.Location = new System.Drawing.Point(12, 12);
             this.outputTextBox.Multiline = true;
             this.outputTextBox.Name = "outputTextBox";
+            this.outputTextBox.ReadOnly = true;
+            this.outputTextBox.ScrollBars = System.Windows.Forms.ScrollBars.Vertical;
             this.outputTextBox.Size = new System.Drawing.Size(380, 182);
             this.outputTextBox.TabIndex = 4;
             // 
