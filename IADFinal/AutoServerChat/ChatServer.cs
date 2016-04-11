@@ -73,7 +73,7 @@ namespace AutoServerChat {
                 TcpListener listener = new TcpListener(IPAddress.Any, Protocol.PORT);
                 try {
                     listener.Start();
-                    //debug
+                    
                     while(!stopping) {
                         if(listener.Pending()) {
                             TcpClient client = listener.AcceptTcpClient();

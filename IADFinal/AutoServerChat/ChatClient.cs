@@ -13,16 +13,31 @@ using System.Threading;
 using System.Threading.Tasks;
 
 namespace AutoServerChat {
+
+    /**
+     * @class   ChatClient
+     *
+     * @brief   Client used to connect to chat session.
+     */
     internal class ChatClient : IChatNode {
         public event EventHandler<MessageSaidEventArgs> MessageSaid;
-        public event EventHandler ConnectionLost;//add handler
-        private TcpClient client;
+        public event EventHandler ConnectionLost;
+
         private int clientAccessCounter = 0;//number of execution context's accessing the tcp client
         private volatile bool connected = false;
+        private TcpClient client;
+        private readonly object clientWriteLock = new object();//locked when writing to client
+
         private string name = null;
         private readonly object nameLock = new object(); 
 
-        //threadsafe
+        /**
+         * @property    public bool Connected
+         *
+         * @brief   Connection status, threadsafe access.
+         *
+         * @return  true if connected, false if not.
+         */
         public bool Connected {
             get {
                 return connected;
@@ -71,7 +86,7 @@ namespace AutoServerChat {
          * @brief   Connects to the specified host.
          *
          * @exception   InvalidOperationException   Thrown when already connected.
-         * @exception   SocketException             Thrown when a Socket error condition occurs.
+         * @exception   SocketException             Thrown when an underlying socket error condition occurs.
          *
          * @param   server  The port.
          */
@@ -85,10 +100,16 @@ namespace AutoServerChat {
             client.Connect(server);
             BeginRecv();
 
+            //only reached if connected
             SendNameTask();
             connected = true;
         }
 
+        /**
+         * @fn  private void BeginRecv()
+         *
+         * @brief   Begins receiving messages from the server.
+         */
         private void BeginRecv() {
             Task.Run(() => {
                 Interlocked.Increment(ref clientAccessCounter);
@@ -127,21 +148,25 @@ namespace AutoServerChat {
                         }
                     }
                 } catch(Exception ex) {
-                    if(ex is SocketException || ex is IOException || ex is ObjectDisposedException) {
-                        connected = false;
-                        if(ConnectionLost != null) {
-                            ConnectionLost(this, null);
-                        }
+                    if(ex is SocketException || ex is ObjectDisposedException || ex is InvalidOperationException) {
+                        //end connection
                     } else {
                         throw;
                     }
                 } finally {
                     Interlocked.Decrement(ref clientAccessCounter);
-                    Close();
+                    Stop();
                 }
             });
         }
 
+        /**
+         * @fn  private Task SendNameTask()
+         *
+         * @brief   Sends the name to the server.
+         *
+         * @return  The Task.
+         */
         private Task SendNameTask() {
             return Task.Run(() => {
                 if(!connected) {
@@ -169,10 +194,13 @@ namespace AutoServerChat {
 
                 Interlocked.Increment(ref clientAccessCounter);
                 try {
-                    client.GetStream().Write(buf, 0, buf.Length);
+                    lock (clientWriteLock) {
+                        client.GetStream().Write(buf, 0, buf.Length);
+                    }
                 } catch(Exception ex) {
-                    if(ex is IOException || ex is ObjectDisposedException) {
-                        //todo: handle connection loss
+                    if(ex is SocketException || ex is ObjectDisposedException) {
+                        //end connection
+                        Stop();
                     } else {
                         throw;
                     }
@@ -182,6 +210,15 @@ namespace AutoServerChat {
             });
         }
 
+        /**
+         * @fn  public void Say(string msg)
+         *
+         * @brief   Sends a say message to the server.
+         *
+         * @exception   ArgumentException   Thrown when message is empty or too long (check the exception message).
+         *
+         * @param   msg The message.
+         */
         public void Say(string msg) {
             msg = msg.Trim();//to save bandwith, trimmed on server side anyway.
 
@@ -212,10 +249,13 @@ namespace AutoServerChat {
 
                 Interlocked.Increment(ref clientAccessCounter);
                 try {
-                    client.GetStream().Write(buf, 0, buf.Length);
+                    lock (clientWriteLock) {
+                        client.GetStream().Write(buf, 0, buf.Length);
+                    }
                 } catch(Exception ex) {
-                    if(ex is IOException || ex is ObjectDisposedException) {
-                        //todo: handle connection loss
+                    if(ex is SocketException || ex is ObjectDisposedException) {
+                        //end connection
+                        Stop();
                     } else {
                         throw;
                     }
@@ -225,11 +265,33 @@ namespace AutoServerChat {
             });
         }
 
+        /**
+         * @fn  public void Close()
+         *
+         * @brief   Closes the connection and waits for everything to wrap up.
+         */
         public void Close() {
-            if(connected) {
+            Stop(false);
+        }
+
+        /**
+         * @fn  private Task Stop()
+         *
+         * @brief   Stops the connection.
+         *
+         * @return The Task.
+         */
+        private Task Stop(bool raiseEvent = true) {
+            return Task.Run(() => {
+
+                if(raiseEvent) {
+                    if(ConnectionLost != null) {
+                        ConnectionLost(this, null);
+                    }
+                }
+
                 connected = false;//signal everything to stop
 
-                //wait for threads using client to wrap up
                 while(clientAccessCounter > 0) {
                     Task.Delay(10).Wait();
                 }
@@ -237,8 +299,7 @@ namespace AutoServerChat {
                 if(client != null) {
                     client.Close();
                 }
-                connected = false;
-            }
+            });
         }
     }
 }

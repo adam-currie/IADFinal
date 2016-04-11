@@ -13,6 +13,12 @@ using System.Net.Sockets;
 using System.Threading.Tasks;
 
 namespace AutoServerChat {
+
+    /**
+     * @class   ChatNode
+     *
+     * @brief   Used to chat on local area network with a zero configuration interface.
+     */
     public class ChatNode : IChatNode {
         public event EventHandler<MessageSaidEventArgs> MessageSaid;
 
@@ -41,6 +47,11 @@ namespace AutoServerChat {
             }
         }
 
+        /**
+         * @fn  public ChatNode()
+         *
+         * @brief   Default constructor.
+         */
         public ChatNode() {
             client = new ChatClient();
             client.ConnectionLost += ClientConnectionLost;
@@ -51,16 +62,35 @@ namespace AutoServerChat {
             };
         }
 
+        /**
+         * @fn  private void ClientConnectionLost(object sender, EventArgs e)
+         *
+         * @brief   Client connection lost handler.
+         *
+         * @param   sender  Source of the event.
+         * @param   e       Event information.
+         */
         private void ClientConnectionLost(object sender, EventArgs e) {
             MessageSaid(this, new MessageSaidEventArgs("CLIENT", "Connection Lost."));
             StartSessionTask();
         }
 
+        /**
+         * @fn  public void Start()
+         *
+         * @brief   Starts attempting to chat (joins or starts session).
+         */
         public void Start() {
             StartSessionTask();
         }
 
-        //todo: exceptions
+        /**
+         * @fn  private Task StartSessionTask()
+         *
+         * @brief   Joins a session or hosts one if non are found.
+         *
+         * @return  The Task.
+         */
         private Task StartSessionTask() {
             if(MessageSaid != null) {
                 MessageSaid(this, new MessageSaidEventArgs("CLIENT", "Searching for session..."));
@@ -69,6 +99,7 @@ namespace AutoServerChat {
                 while(!client.Connected) {
                     List<CandidateServer> candidates = GetCandidateServers();
 
+                    //close any old connection before begining.
                     lock (clientLock) {
                         if(client != null) {
                             client.Close();
@@ -99,7 +130,7 @@ namespace AutoServerChat {
                         try {
                             server = new ChatServer();
                             lock (clientLock) {
-                                client.Connect(new IPEndPoint(IPAddress.Parse("127.0.0.1"), Protocol.PORT));//todo: exceptions
+                                client.Connect(new IPEndPoint(IPAddress.Parse("127.0.0.1"), Protocol.PORT));
                             }
                         } catch(SocketException ex) {
                             //connection failed
@@ -115,7 +146,9 @@ namespace AutoServerChat {
                 string msg = "";
                 lock (clientLock) {
                     while(sayBacklog.TryDequeue(out msg)) {
-                        client.Say(msg);//todo: exceptions
+                        try {
+                            client.Say(msg);
+                        } catch(ArgumentException) {}//ignore
                     }
                 }
             });
@@ -202,22 +235,45 @@ namespace AutoServerChat {
             return candidates;
         }
 
+        /**
+         * @fn  public void Say(string msg)
+         *
+         * @brief   Says something on the chat.
+         *
+         * @exception   ArgumentException   Thrown when message is empty or too long (check the exception message). 
+         *
+         * @param   msg The message.
+         */
         public void Say(string msg) {
             if(client.Connected) {
                 lock (clientLock) {
-                    client.Say(msg);//todo: exceptions
+                    client.Say(msg);
                 }
             } else {
-                sayBacklog.Enqueue(msg);
+                sayBacklog.Enqueue(msg);//to be said upon connecting to a session later.
             }
         }
 
+        /**
+         * @class   CandidateServer
+         *
+         * @brief   Represents a server that this node could connect the client to.
+         */
         private class CandidateServer : IComparable<CandidateServer> {
             public readonly IPAddress Ip;
             public readonly UInt32 Age;//at the time added
             public readonly DateTime TimeAdded;
             public readonly UInt64 Uid;
 
+            /**
+             * @fn  public CandidateServer(IPAddress ip, UInt32 age, UInt64 uid)
+             *
+             * @brief   Constructor.
+             *
+             * @param   ip  The IP.
+             * @param   age The age.
+             * @param   uid The UID.
+             */
             public CandidateServer(IPAddress ip, UInt32 age, UInt64 uid) {
                 Ip = ip;
                 Age = age;

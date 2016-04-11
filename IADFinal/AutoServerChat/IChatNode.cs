@@ -24,7 +24,7 @@ namespace AutoServerChat {
     /**
      * @interface   IChatNode
      *
-     * @brief   Interface for chat nodes.
+     * @brief   Defines the interface of a connection to a chat session.
      */
     internal interface IChatNode {
 
