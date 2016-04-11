@@ -58,6 +58,8 @@
             this.nameTextBox.Name = "nameTextBox";
             this.nameTextBox.Size = new System.Drawing.Size(100, 20);
             this.nameTextBox.TabIndex = 2;
+            this.nameTextBox.Enter += new System.EventHandler(this.SetNameEvent);
+            this.nameTextBox.Leave += new System.EventHandler(this.SetNameEvent);
             // 
             // inputTextBox
             // 

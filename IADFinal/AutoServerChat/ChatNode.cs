@@ -1,29 +1,43 @@
-﻿using System;
+﻿/**
+* @file		ChatNode.cs
+* @project	AutoServerChat
+* @author	Adam Currie & Alexander Martin
+* @date		2016-04-7
+ */
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
-using System.Text;
 using System.Threading.Tasks;
 
 namespace AutoServerChat {
     public class ChatNode : IChatNode {
         public event EventHandler<MessageSaidEventArgs> MessageSaid;
 
-        private object clientLock = new object();
-        private ChatClient client;//only access when locking clientLock
-
-        private ChatServer server;
-        private volatile bool serverRunning = false;
+        private readonly object clientLock = new object();//for access to non threadsafe methods of client
         private ConcurrentQueue<string> sayBacklog = new ConcurrentQueue<string>();
 
+        private ChatClient client;
+        private ChatServer server;
+        
+
+        /**
+         * @property    string Name
+         *
+         * @brief   Gets or sets the name that identifies messages from this node.
+         *          
+         * @exception   ArgumentException   Thrown when name is empty or too long.
+         *
+         * @return  The name or null if unset.
+         */
         public string Name {
             get {
-                throw new NotImplementedException();
+                return client.Name;
             }
             set {
-                throw new NotImplementedException();
+                client.Name = value;
             }
         }
 
@@ -44,8 +58,6 @@ namespace AutoServerChat {
 
         public void Start() {
             StartSessionTask();
-            //server = new ChatServer();//todo: switch to test, then remove
-            //serverRunning = true;
         }
 
         //todo: exceptions
@@ -61,33 +73,37 @@ namespace AutoServerChat {
                         if(client != null) {
                             client.Close();
                         }
+                    }
 
-                        foreach(var server in candidates) {
-                            try {
+                    foreach(var server in candidates) {
+                        try {
+                            lock (clientLock) {
                                 client.Connect(new IPEndPoint(server.Ip, Protocol.PORT));
-                                break;
-                            } catch(Exception ex) {
-                                //todo: only catch expected exceptions
                             }
+                            break;
+                        } catch(SocketException ex) {
+                            //connection failed
+                        }
+                    }
+
+                    //if can't connect to anything, start new server and connect to that
+                    if(!client.Connected) {
+                        if(MessageSaid != null) {
+                            MessageSaid(this, new MessageSaidEventArgs("CLIENT", "Starting new session."));
                         }
 
-                        //if can't connect to anything, start new server and connect to that
-                        if(!client.Connected) {
-                            if(MessageSaid != null) {
-                                MessageSaid(this, new MessageSaidEventArgs("CLIENT", "Starting new session."));
-                            }
-                            //todo: make sure this is a good check if the server is running
-                            if(server != null) {
-                                server.Dispose();
-                            }
-                            try {
-                                server = new ChatServer();
+                        if(server != null) {
+                            server.Dispose();
+                        }
+
+                        try {
+                            server = new ChatServer();
+                            lock (clientLock) {
                                 client.Connect(new IPEndPoint(IPAddress.Parse("127.0.0.1"), Protocol.PORT));//todo: exceptions
-                            } catch(Exception ex) {
-                                //todo: only catch expected exceptions
                             }
+                        } catch(SocketException ex) {
+                            //connection failed
                         }
-
                     }
                 }
 
@@ -97,18 +113,28 @@ namespace AutoServerChat {
 
                 //write backlog
                 string msg = "";
-                while(sayBacklog.TryDequeue(out msg)) {
-                    client.Say(msg);//todo: exceptions
+                lock (clientLock) {
+                    while(sayBacklog.TryDequeue(out msg)) {
+                        client.Say(msg);//todo: exceptions
+                    }
                 }
             });
         }
 
-        //candidates are sorted from oldest to newest.
+        /**
+         * @fn  private List<CandidateServer> GetCandidateServers()
+         *
+         * @brief   candidates are sorted from oldest to newest.
+         *
+         * @exception   SocketException Thrown when a Socket error condition occurs.
+         *
+         * @return  The candidate servers.
+         */
         private List<CandidateServer> GetCandidateServers() {
             List<CandidateServer> candidates = new List<CandidateServer>();
+            var crcGen = new DamienG.Security.Cryptography.Crc32();
 
-            using(UdpClient udpClient = new UdpClient()) {//todo: exception
-
+            using(UdpClient udpClient = new UdpClient()) {
 
                 //set socket to allow multiple multiple binds and broadcasting
                 udpClient.ExclusiveAddressUse = false;
@@ -136,10 +162,15 @@ namespace AutoServerChat {
                             continue;//skip this one
                         }
 
-                        //todo: check crc 
+                        //check crc
+                        byte[] crc = new byte[4];
+                        Buffer.BlockCopy(bytes, 13, crc, 0, 4);
+                        if(!crcGen.ComputeHash(bytes, 1, 12).SequenceEqual(crc)) {
+                            continue;//skip
+                        }
 
                         IPAddress ip = sender.Address;
-                        UInt64 guid = BitConverter.ToUInt64(bytes, 5);
+                        UInt64 uid = BitConverter.ToUInt64(bytes, 5);
                         UInt32 age = BitConverter.ToUInt32(bytes, 1);
 
                         //check if allready in list
@@ -155,7 +186,7 @@ namespace AutoServerChat {
                         }
                         
                         //add to list of candidates
-                        candidates.Add(new CandidateServer(ip, age, guid));
+                        candidates.Add(new CandidateServer(ip, age, uid));
 
                         //set remaining time to max of one second
                         if(stopTime > DateTime.UtcNow.AddSeconds(1)) {//more that 1 second left
@@ -167,13 +198,15 @@ namespace AutoServerChat {
                 }
             }
 
-            candidates.Sort();//todo: CHECK THIS
+            candidates.Sort();
             return candidates;
         }
 
         public void Say(string msg) {
             if(client.Connected) {
-                client.Say(msg);//todo: exceptions
+                lock (clientLock) {
+                    client.Say(msg);//todo: exceptions
+                }
             } else {
                 sayBacklog.Enqueue(msg);
             }
@@ -183,12 +216,12 @@ namespace AutoServerChat {
             public readonly IPAddress Ip;
             public readonly UInt32 Age;//at the time added
             public readonly DateTime TimeAdded;
-            public readonly UInt64 Guid;
+            public readonly UInt64 Uid;
 
-            public CandidateServer(IPAddress ip, UInt32 age, UInt64 guid) {
+            public CandidateServer(IPAddress ip, UInt32 age, UInt64 uid) {
                 Ip = ip;
                 Age = age;
-                Guid = guid;
+                Uid = uid;
                 TimeAdded = DateTime.UtcNow;
             }
 
@@ -206,9 +239,9 @@ namespace AutoServerChat {
                 double otherAge = other.Age + (DateTime.UtcNow - other.TimeAdded).TotalSeconds;
                 if(Math.Abs(thisAge - otherAge) < 2) {
                     //compare ip if age difference is with margin of error
-                    if(this.Guid > other.Guid) {
+                    if(this.Uid > other.Uid) {
                         return 1;
-                    } else if(this.Guid == other.Guid) {
+                    } else if(this.Uid == other.Uid) {
                         return 0;
                     } else {
                         return -1;

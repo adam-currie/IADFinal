@@ -1,9 +1,9 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
+﻿/**
+* @file		Protocol.cs
+* @project	AutoServerChat
+* @author	Adam Currie & Alexander Martin
+* @date		2016-04-7
+ */
 namespace AutoServerChat {
     internal static class Protocol {
         public const ushort PORT = 43993;

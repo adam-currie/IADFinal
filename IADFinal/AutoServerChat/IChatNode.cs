@@ -1,8 +1,10 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+﻿/**
+* @file		IChatNode.cs
+* @project	AutoServerChat
+* @author	Adam Currie & Alexander Martin
+* @date		2016-04-7
+ */
+using System;
 
 namespace AutoServerChat {
 
@@ -40,7 +42,7 @@ namespace AutoServerChat {
          *
          * @brief   Gets or sets the name that identifies messages from this node.
          *
-         * @return  The name.
+         * @return  The name or null if unset.
          */
         string Name {
             get;

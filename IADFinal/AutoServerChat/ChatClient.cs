@@ -1,7 +1,11 @@
-﻿using System;
-using System.Collections.Generic;
+﻿/**
+* @file		ChatClient.cs
+* @project	AutoServerChat
+* @author	Adam Currie & Alexander Martin
+* @date		2016-04-7
+ */
+using System;
 using System.IO;
-using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -15,19 +19,10 @@ namespace AutoServerChat {
         private TcpClient client;
         private int clientAccessCounter = 0;//number of execution context's accessing the tcp client
         private volatile bool connected = false;
+        private string name = null;
+        private readonly object nameLock = new object(); 
 
-        public string Name {
-            get {
-                throw new NotImplementedException();
-            }
-            set {
-                if(!connected) {
-                    throw new InvalidOperationException("not connected");
-                }
-                throw new NotImplementedException();
-            }
-        }
-
+        //threadsafe
         public bool Connected {
             get {
                 return connected;
@@ -35,22 +30,62 @@ namespace AutoServerChat {
         }
 
         /**
-         * @fn  public Client(string host, int port)
+         * @property    public string Name
          *
-         * @brief   Constructer, connects to the specified host.
+         * @brief   Gets or sets the name that identifies messages from this node.
          *
-         * @param   port    The port.
+         * @exception   ArgumentException   Thrown when name is empty or too long.
+         *
+         * @return  The name or null if unset.
+         */
+        public string Name {
+            get {
+                lock (nameLock){
+                    return name;
+                }
+            }
+            set {
+                value = value.Trim();
+                //check empty
+                if(value == "") {
+                    throw new ArgumentException("name cannot be empty.");
+                }
+
+                //check byte len
+                if(Encoding.Unicode.GetBytes(value).Length > byte.MaxValue) {
+                    throw new ArgumentException("message length is too long.");
+                }
+
+                lock (nameLock) {
+                    name = value;
+                    if(connected) {
+                        SendNameTask();
+                    }
+                }
+            }
+        }
+
+        /**
+         * @fn  public void Connect(IPEndPoint server)
+         *
+         * @brief   Connects to the specified host.
+         *
+         * @exception   InvalidOperationException   Thrown when already connected.
+         * @exception   SocketException             Thrown when a Socket error condition occurs.
+         *
+         * @param   server  The port.
          */
         public void Connect(IPEndPoint server) {
             if(connected) {
                 throw new InvalidOperationException("already connected");
             }
 
-            //todo: exceptions
             client = new TcpClient();
             client.ExclusiveAddressUse = false;
             client.Connect(server);
             BeginRecv();
+
+            SendNameTask();
             connected = true;
         }
 
@@ -70,7 +105,7 @@ namespace AutoServerChat {
                                 byte nameLen = inBytes[0];
                                 //get name
                                 inBytes = new byte[nameLen];
-                                stream.Read(inBytes, 0, nameLen);//todo: make sure this is reading it all
+                                stream.Read(inBytes, 0, nameLen);
                                 string sayer = Encoding.Unicode.GetString(inBytes);
 
                                 //get message length
@@ -107,13 +142,53 @@ namespace AutoServerChat {
             });
         }
 
-        public void Say(string msg) {
-            //todo: maybe do all on new task
-            if(!connected) {
-                throw new InvalidOperationException("not connected");
-            }
+        private Task SendNameTask() {
+            return Task.Run(() => {
+                if(!connected) {
+                    return;
+                }
 
+                byte[] nameBytes;
+
+                lock (nameLock) {
+                    if(name == null) {
+                        return;
+                    }
+                    //get msg bytes
+                    nameBytes = Encoding.Unicode.GetBytes(name);
+                }
+
+                //get length bytes
+                byte[] lengthByte = BitConverter.GetBytes((byte)nameBytes.Length);
+
+                //fill buffer
+                byte[] buf = new byte[2 + nameBytes.Length];
+                buf[0] = Protocol.SET_NAME;
+                buf[1] = lengthByte[0];
+                Buffer.BlockCopy(nameBytes, 0, buf, 2, nameBytes.Length);
+
+                Interlocked.Increment(ref clientAccessCounter);
+                try {
+                    client.GetStream().Write(buf, 0, buf.Length);
+                } catch(Exception ex) {
+                    if(ex is IOException || ex is ObjectDisposedException) {
+                        //todo: handle connection loss
+                    } else {
+                        throw;
+                    }
+                } finally {
+                    Interlocked.Decrement(ref clientAccessCounter);
+                }
+            });
+        }
+
+        public void Say(string msg) {
             msg = msg.Trim();//to save bandwith, trimmed on server side anyway.
+
+            //check empty
+            if(msg == "") {
+                throw new ArgumentException("message is empty.");
+            }
 
             //get msg bytes
             byte[] msgBytes = Encoding.Unicode.GetBytes(msg);
@@ -121,27 +196,33 @@ namespace AutoServerChat {
                 throw new ArgumentException("message length is too long.");
             }
 
-            //get length bytes
-            byte[] lengthBytes = BitConverter.GetBytes((UInt16)msgBytes.Length);
-
-            //fill buffer
-            byte[] buf = new byte[3 + msgBytes.Length];
-            buf[0] = Protocol.SAY;
-            Buffer.BlockCopy(lengthBytes, 0, buf, 1, 2);
-            Buffer.BlockCopy(msgBytes, 0, buf, 3, msgBytes.Length);
-
-            Interlocked.Increment(ref clientAccessCounter);
-            try {
-                client.GetStream().Write(buf, 0, buf.Length);
-            } catch(Exception ex) {
-                if(ex is IOException || ex is ObjectDisposedException) {
-                    //todo: handle connection loss
-                } else {
-                    throw;
+            Task.Run(() => {
+                if(!connected) {
+                    return;
                 }
-            } finally {
-                Interlocked.Decrement(ref clientAccessCounter);
-            }
+
+                //get length bytes
+                byte[] lengthBytes = BitConverter.GetBytes((UInt16)msgBytes.Length);
+
+                //fill buffer
+                byte[] buf = new byte[3 + msgBytes.Length];
+                buf[0] = Protocol.SAY;
+                Buffer.BlockCopy(lengthBytes, 0, buf, 1, 2);
+                Buffer.BlockCopy(msgBytes, 0, buf, 3, msgBytes.Length);
+
+                Interlocked.Increment(ref clientAccessCounter);
+                try {
+                    client.GetStream().Write(buf, 0, buf.Length);
+                } catch(Exception ex) {
+                    if(ex is IOException || ex is ObjectDisposedException) {
+                        //todo: handle connection loss
+                    } else {
+                        throw;
+                    }
+                } finally {
+                    Interlocked.Decrement(ref clientAccessCounter);
+                }
+            });
         }
 
         public void Close() {
